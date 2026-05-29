@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { loadTransactions, saveTransaction, deleteTransaction, loadProfile } from "./db.js";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -66,9 +67,7 @@ const fmtShort = (v) => {
 const mk = (d) => { const x=new Date(d); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,"0")}`; };
 const getCat = (id) => CATS.find(c=>c.id===id)||CATS.at(-1);
 
-// ─── Storage ──────────────────────────────────────────────────────────────────
-function loadTxs() { try { return JSON.parse(localStorage.getItem("oj:txs")||"[]"); } catch { return []; } }
-function saveTxs(t) { try { localStorage.setItem("oj:txs",JSON.stringify(t)); } catch {} }
+// ─── API Key (Anthropic) ──────────────────────────────────────────────────────
 function loadKey() {
   if (import.meta.env.VITE_ANTHROPIC_API_KEY) return import.meta.env.VITE_ANTHROPIC_API_KEY;
   return localStorage.getItem("oj:apikey")||"";
@@ -237,9 +236,11 @@ function SetupScreen({onSave}) {
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
-export default function OrganizaJa() {
+export default function OrganizaJa({ user, onLogout }) {
   const [apiKey,setApiKey]=useState(()=>loadKey());
-  const [txs,setTxs]=useState(()=>loadTxs());
+  const [txs,setTxs]=useState([]);
+  const [loadingData,setLoadingData]=useState(true);
+  const [profile,setProfile]=useState(null);
   const [tab,setTab]=useState("dashboard");
   const [subTab,setSubTab]=useState("geral");
   const [month,setMonth]=useState(()=>mk(new Date()));
@@ -249,9 +250,33 @@ export default function OrganizaJa() {
   const [form,setForm]=useState(null);
   const fileRef=useRef(); const camRef=useRef(); const dropRef=useRef();
 
-  const persist = useCallback((next)=>{setTxs(next);saveTxs(next);},[]);
+  // Carrega dados do Supabase
+  useEffect(()=>{
+    if(!user) return;
+    Promise.all([loadTransactions(user.id), loadProfile(user.id)])
+      .then(([txData, profileData])=>{
+        setTxs(txData||[]);
+        setProfile(profileData);
+      })
+      .finally(()=>setLoadingData(false));
+  },[user]);
 
-  if (!apiKey) return <SetupScreen onSave={setApiKey}/>;
+  const persist = useCallback(async(action, payload)=>{
+    if(action==="add") {
+      const saved = await saveTransaction(user.id, payload);
+      setTxs(prev=>[{ ...payload, id: saved.id }, ...prev]);
+    } else if(action==="delete") {
+      await deleteTransaction(payload);
+      setTxs(prev=>prev.filter(t=>t.id!==payload));
+    }
+  },[user]);
+
+  if(loadingData) return (
+    <div style={{minHeight:"100vh",background:T.bg,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{width:40,height:40,border:`3px solid ${T.border}`,borderTopColor:T.green,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
 
   // ─ Computed
   const mTxs=txs.filter(t=>mk(t.data)===month);
@@ -285,17 +310,17 @@ export default function OrganizaJa() {
     setUploading(false);
   };
   const openForm=(base,mode)=>{setForm({tipo:"despesa",descricao:"",valor:"",data:new Date().toISOString().slice(0,10),categoria:"outros",estabelecimento:"",isPJ:false,pjPct:30,...base,_mode:mode});setShowModal(true);};
-  const saveForm=()=>{
+  const saveForm=async()=>{
     if(!form.descricao||!form.valor)return;
     const valor=parseFloat(String(form.valor).replace(",","."));
     const pjValor=form.isPJ?+(valor*form.pjPct/100).toFixed(2):0;
     const pfValor=+(valor-pjValor).toFixed(2);
-    const tx={id:Date.now().toString(),...form,valor,pjValor,pfValor,createdAt:new Date().toISOString()};
-    delete tx._mode;
-    persist([...txs,tx]);
+    const tx={...form,valor,pjValor,pfValor};
+    delete tx._mode; delete tx.id;
+    await persist("add",tx);
     setShowModal(false);setForm(null);setMonth(mk(tx.data));setTab("dashboard");
   };
-  const deleteTx=(id)=>persist(txs.filter(t=>t.id!==id));
+  const deleteTx=async(id)=>await persist("delete",id);
 
   // ─ Styles
   const CSS = `
@@ -340,7 +365,13 @@ export default function OrganizaJa() {
               <div style={{fontSize:10,color:T.muted,letterSpacing:0.3,fontWeight:500}}>Suas finanças, organizadas já.</div>
             </div>
           </div>
-          <button className="btn btn-green" onClick={()=>openForm({tipo:"despesa",isPJ:false,pjPct:30},"manual")} style={{padding:"8px 16px",fontSize:13,borderRadius:12}}>+ Novo</button>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <button className="btn btn-green" onClick={()=>openForm({tipo:"despesa",isPJ:false,pjPct:30},"manual")} style={{padding:"8px 16px",fontSize:13,borderRadius:12}}>+ Novo</button>
+            <button onClick={onLogout} title="Sair"
+              style={{width:36,height:36,borderRadius:10,background:T.surf2,border:`1px solid ${T.border}`,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              👤
+            </button>
+          </div>
         </div>
         {/* Tab bar */}
         <div style={{display:"flex",gap:0}}>
